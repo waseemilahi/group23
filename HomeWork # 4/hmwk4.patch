@@ -1,0 +1,1413 @@
+diff -ruN linux-2.6.11.12.hmwk4-orig/arch/i386/kernel/entry.S linux-2.6.11.12.hmwk4/arch/i386/kernel/entry.S
+--- linux-2.6.11.12.hmwk4-orig/arch/i386/kernel/entry.S	2008-10-14 13:03:27.000000000 -0400
++++ linux-2.6.11.12.hmwk4/arch/i386/kernel/entry.S	2008-11-04 15:52:06.000000000 -0500
+@@ -824,7 +824,7 @@
+ 	.long sys_getdents64	/* 220 */
+ 	.long sys_fcntl64
+ 	.long sys_ni_syscall	/* reserved for TUX */
+-	.long sys_ni_syscall
++	.long sys_getcweight
+ 	.long sys_gettid
+ 	.long sys_readahead	/* 225 */
+ 	.long sys_setxattr
+@@ -852,7 +852,7 @@
+ 	.long sys_io_submit
+ 	.long sys_io_cancel
+ 	.long sys_fadvise64	/* 250 */
+-	.long sys_ni_syscall
++	.long sys_setcweight
+ 	.long sys_exit_group
+ 	.long sys_lookup_dcookie
+ 	.long sys_epoll_create
+diff -ruN linux-2.6.11.12.hmwk4-orig/include/asm-i386/unistd.h linux-2.6.11.12.hmwk4/include/asm-i386/unistd.h
+--- linux-2.6.11.12.hmwk4-orig/include/asm-i386/unistd.h	2008-10-14 13:03:52.000000000 -0400
++++ linux-2.6.11.12.hmwk4/include/asm-i386/unistd.h	2008-11-04 15:57:28.000000000 -0500
+@@ -228,7 +228,7 @@
+ #define __NR_madvise1		219	/* delete when C lib stub is removed */
+ #define __NR_getdents64		220
+ #define __NR_fcntl64		221
+-/* 223 is unused */
++#define __NR_getcweight         223
+ #define __NR_gettid		224
+ #define __NR_readahead		225
+ #define __NR_setxattr		226
+@@ -256,7 +256,7 @@
+ #define __NR_io_submit		248
+ #define __NR_io_cancel		249
+ #define __NR_fadvise64		250
+-
++#define __NR_setcweight         251
+ #define __NR_exit_group		252
+ #define __NR_lookup_dcookie	253
+ #define __NR_epoll_create	254
+diff -ruN linux-2.6.11.12.hmwk4-orig/include/linux/sched.h linux-2.6.11.12.hmwk4/include/linux/sched.h
+--- linux-2.6.11.12.hmwk4-orig/include/linux/sched.h	2008-10-14 13:03:52.000000000 -0400
++++ linux-2.6.11.12.hmwk4/include/linux/sched.h	2008-11-08 17:32:32.000000000 -0500
+@@ -130,6 +130,7 @@
+ #define SCHED_NORMAL		0
+ #define SCHED_FIFO		1
+ #define SCHED_RR		2
++#define SCHED_CWRR              4
+ 
+ struct sched_param {
+ 	int sched_priority;
+@@ -360,6 +361,8 @@
+ 
+ #define rt_task(p)		(unlikely((p)->prio < MAX_RT_PRIO))
+ 
++#define cwrr_task(p)            (unlikely((p)->policy == SCHED_CWRR))
++
+ /*
+  * Some day this will be a full-fledged user tracking system..
+  */
+@@ -532,10 +535,16 @@
+ 	unsigned long flags;	/* per process flags, defined below */
+ 	unsigned long ptrace;
+ 
++        int cid;/*container id for this process's container*/          
++        struct weighted_container *parent_container;/*a pointer to container I point to*/
++        atomic_t container_need_resched;/* a flag to signalparent container needs requeuing*/
++      
+ 	int lock_depth;		/* Lock depth */
+ 
+ 	int prio, static_prio;
+-	struct list_head run_list;
++
++        struct list_head run_list;/*also use it to add process in container's run_list*/
++
+ 	prio_array_t *array;
+ 
+ 	unsigned long sleep_avg;
+diff -ruN linux-2.6.11.12.hmwk4-orig/include/linux/syscalls.h linux-2.6.11.12.hmwk4/include/linux/syscalls.h
+--- linux-2.6.11.12.hmwk4-orig/include/linux/syscalls.h	2008-10-14 13:03:52.000000000 -0400
++++ linux-2.6.11.12.hmwk4/include/linux/syscalls.h	2008-11-04 15:59:01.000000000 -0500
+@@ -506,4 +506,8 @@
+ asmlinkage long sys_keyctl(int cmd, unsigned long arg2, unsigned long arg3,
+ 			   unsigned long arg4, unsigned long arg5);
+ 
++asmlinkage int sys_getcweight(int cid);
++
++asmlinkage int sys_setcweight(int cid, int weight);
++
+ #endif
+diff -ruN linux-2.6.11.12.hmwk4-orig/kernel/sched.c linux-2.6.11.12.hmwk4/kernel/sched.c
+--- linux-2.6.11.12.hmwk4-orig/kernel/sched.c	2008-10-14 13:03:46.000000000 -0400
++++ linux-2.6.11.12.hmwk4/kernel/sched.c	2008-11-09 23:45:26.000000000 -0500
+@@ -46,8 +46,18 @@
+ #include <linux/syscalls.h>
+ #include <linux/times.h>
+ #include <asm/tlb.h>
+-
++#include <linux/errno.h>
+ #include <asm/unistd.h>
++#include <linux/rwsem.h>
++
++
++extern int errno;
++
++static int global_CID  = 0 ;
++
++/*This lock keeps the access to containers synchronized
++  kind of a global lock: imitialize it globally*/
++rwlock_t rwsem = RW_LOCK_UNLOCKED;
+ 
+ /*
+  * Convert user-nice values [ -20 ... 0 ... 19 ]
+@@ -181,11 +191,36 @@
+ #define BITMAP_SIZE ((((MAX_PRIO+1+7)/8)+sizeof(long)-1)/sizeof(long))
+ 
+ typedef struct runqueue runqueue_t;
++ 
++/* The Container Data Structure*/
++
++struct weighted_container{
++		  int cid;										/* container ID */
++		  int weight;									/* container weight */
++		  unsigned int time_slice; 						/* container time_slice */
++		  
++		  spinlock_t container_lock;					/* might come in handy */
++		  int active_flag;								/* this is a count of how many active processes are in the container. if no active processes exit, container should not schedule in */								
++		  int total_processes;							/* a reference count to the container. when reaches 0, delete the container  OR dont add any more processes as it is being deleted*/
++		  struct list_head container_list;				/* pointer to the next and previous active container */
++		  struct list_head runnable_processes ;			/* the container's run queue anchor */
++		  struct list_head sleeping_containers ;		/* pointer to the next and previous sleeping container, DEF: sleeping container = a non empty container that is NOT associated with any RUNNING tasks.*/ 		  
++		};
++
++/*The structure for active and expired
++ *runqueues
++ */
+ 
+ struct prio_array {
+ 	unsigned int nr_active;
+ 	unsigned long bitmap[BITMAP_SIZE];
+ 	struct list_head queue[MAX_PRIO];
++    struct list_head *cwrr_q;	/*  a pointer to the container anchor. provides same feel as calling:  array->queue + p->prio.  so:  array->cwrr_q  when manupulating CWRR_Q.  */
++	struct list_head *cwrr_sq;	/*  a pointer to the sleeping container anchor. provides same feel as calling:  array->queue + p->prio.  so:  array->cwrr_sq  when manupulating CWRR_SQ.  */
++	struct list_head *current_cwrr_rq;	/*  a pointer to the container's run_q anchor. provides same feel as calling:  array->queue + p->prio.  so:  array->current_cwrr_rq  when manupulating a cwrr_runqueue.  */
++	int* nr_active_cwrr_q;
++	int* nr_active_cwrr_sq;
++	
+ };
+ 
+ /*
+@@ -208,6 +243,11 @@
+ #endif
+ 	unsigned long long nr_switches;
+ 
++    struct list_head	cwrr_q_anchor;		/* this is master list_head for the container q */
++	struct list_head	cwrr_sq_anchor;		/* this is master list_head for the sleeping container q */
++	int nr_active_cwrr_q;
++	int nr_active_cwrr_sq;
++
+ 	/*
+ 	 * This is part of a global counter where only the total sum
+ 	 * over all CPUs matters. A task can increase this counter on
+@@ -277,6 +317,66 @@
+ 	unsigned long sbe_cnt;
+ #endif
+ };
++static inline void set_container_need_resched(struct task_struct *tsk){
++        atomic_set( &tsk->container_need_resched, 1 );
++}
++
++/*Container Queue Functions*/
++
++static void dequeue_container(struct task_struct *p, struct list_head *anchor)
++{
++  if (anchor==p->array->cwrr_q) /* this is a container q. */
++    {
++      p->array->nr_active_cwrr_q--;			/* this is called within a lock on the runq  	*/
++      list_del(&p->parent_container->container_list);			
++    }
++  else	/*this is a container sq */
++    {
++      p->array->nr_active_cwrr_sq--;			/* this is called within a lock on the runq  	*/
++      list_del(&p->parent_container->sleeping_containers);			
++    }
++}
++
++static void enqueue_container(struct task_struct *p,struct list_head *anchor)
++{
++  
++  /*dont ask questions, just do what you are told. whoever calls this function must know what they are doing, */
++  if (anchor==p->array->cwrr_q) /* this is a container q. */
++    {
++      p->array->nr_active_cwrr_q++;  		 /* this is called within a lock on the runq  	*/
++      list_add_tail(&p->parent_container->container_list, anchor);/* insert that puppy!	*/
++    }
++  else	/*this is a container sq */
++    {
++      p->array->nr_active_cwrr_sq++; /* this is called within a lock on the runq  	*/
++      list_add_tail(&p->parent_container->sleeping_containers, anchor);/* insert that puppy!*/
++    }
++}
++
++static void requeue_container(struct task_struct *p, struct list_head *anchor){
++  if (anchor==p->array->cwrr_q) /* this is a container q. */
++    {
++      list_move_tail(&p->parent_container->container_list, anchor); 
++    }
++  else	/*this is a container sq - why this case will be called, i dont know . but adding this code wont hurt.*/
++    {
++      list_move_tail(&p->parent_container->container_list, anchor); 
++    }
++}
++
++static inline void enqueue_container_head(struct task_struct *p,struct list_head *anchor)
++{
++  if (anchor==p->array->cwrr_q) /* this is a container q. */
++    {
++      p->array->nr_active_cwrr_q++;
++      list_add(&p->parent_container->container_list, anchor);/* add that puppy!*/
++    }
++  else	/*this is a container sq */
++    {
++      p->array->nr_active_cwrr_sq++;			
++      list_add(&p->parent_container->sleeping_containers, anchor);/* add that puppy!*/
++    }
++}
+ 
+ static DEFINE_PER_CPU(struct runqueue, runqueues);
+ 
+@@ -565,19 +665,42 @@
+  */
+ static void dequeue_task(struct task_struct *p, prio_array_t *array)
+ {
+-	array->nr_active--;
+-	list_del(&p->run_list);
+-	if (list_empty(array->queue + p->prio))
+-		__clear_bit(p->prio, array->bitmap);
++	if (cwrr_task(p))
++	{
++		spin_lock(&(p->parent_container->container_lock));
++		/* 	dont ask questions, just do what you are told. whoever calls this function must know what they are doing,	*/
++		p->parent_container->active_flag--;			/* this is called within a lock on the runq  	*/
++		spin_unlock(&(p->parent_container->container_lock));
++		list_del(&p->run_list);						/* delete that puppy! 				*/
++	}
++	else
++	{
++		array->nr_active--;
++		list_del(&p->run_list);
++		if (list_empty(array->queue + p->prio))
++			__clear_bit(p->prio, array->bitmap);
++	}
+ }
+ 
+ static void enqueue_task(struct task_struct *p, prio_array_t *array)
+ {
+-	sched_info_queued(p);
+-	list_add_tail(&p->run_list, array->queue + p->prio);
+-	__set_bit(p->prio, array->bitmap);
+-	array->nr_active++;
+-	p->array = array;
++	if (cwrr_task(p))
++	{
++		spin_lock(&(p->parent_container->container_lock));
++		/* 	dont ask questions, just do what you are told. whoever calls this function must know what they are doing,	*/
++		p->parent_container->active_flag++;									 /* this is called within a lock on the runq  	*/
++		spin_unlock(&(p->parent_container->container_lock));
++		list_add_tail(&p->run_list, array->current_cwrr_rq);/* insert that puppy! 				*/
++		p->array = array;
++	}
++	else
++	{
++		sched_info_queued(p);
++		list_add_tail(&p->run_list, array->queue + p->prio);
++		__set_bit(p->prio, array->bitmap);
++		array->nr_active++;
++		p->array = array;
++	}
+ }
+ 
+ /*
+@@ -586,15 +709,36 @@
+  */
+ static void requeue_task(struct task_struct *p, prio_array_t *array)
+ {
+-	list_move_tail(&p->run_list, array->queue + p->prio);
++	 if (cwrr_task(p)){/* this has nothing to do with containers expireing or not. happens only to Active tasks. */
++			if (atomic_read(&(p->container_need_resched))) /*this is a request to requeue a container!*/
++				
++				list_move_tail(&p->parent_container->container_list, array->cwrr_q); /* array->container_list is a pointer to container_list _head. so we need to dereference it when we use it. */
++			else
++				/*just requeue a task.... */
++				list_move_tail(&p->run_list, array->current_cwrr_rq); /* array->container_list->running_processes is a pointer to container_list _head. so we need to dereference it when we use it. */
++		}
++		else
++			list_move_tail(&p->run_list, array->queue + p->prio);
+ }
+ 
+ static inline void enqueue_task_head(struct task_struct *p, prio_array_t *array)
+ {
+-	list_add(&p->run_list, array->queue + p->prio);
+-	__set_bit(p->prio, array->bitmap);
+-	array->nr_active++;
+-	p->array = array;
++	if (cwrr_task(p))
++	{
++		spin_lock(&(p->parent_container->container_lock));
++		/* 	dont ask questions, just do what you are told. whoever calls this function must know wheat they are doing,	*/
++		p->parent_container->active_flag++;			/* this is called within a lock on the runq  	*/
++		spin_unlock(&(p->parent_container->container_lock));
++		list_add(&p->run_list, array->current_cwrr_rq);/* add that puppy! 				*/
++		p->array = array;
++	}
++	else
++	{
++		list_add(&p->run_list, array->queue + p->prio);
++		__set_bit(p->prio, array->bitmap);
++		array->nr_active++;
++		p->array = array;
++	}
+ }
+ 
+ /*
+@@ -633,8 +777,27 @@
+  */
+ static inline void __activate_task(task_t *p, runqueue_t *rq)
+ {
++	
++	
++	if(cwrr_task(p))
++	{
++		enqueue_task(p,p->array);
++		spin_lock(&(p->parent_container->container_lock));
++		if(p->parent_container->active_flag == 1)
++		{
++			write_lock(&rwsem);
++	        dequeue_container(p,p->array->cwrr_sq);
++	        enqueue_container(p,p->array->cwrr_q);
++		    write_unlock(&rwsem);
++		}
++		spin_unlock(&(p->parent_container->container_lock));
++		
++	}
++	else
++	{
+ 	enqueue_task(p, rq->active);
+ 	rq->nr_running++;
++	}
+ }
+ 
+ /*
+@@ -761,9 +924,25 @@
+  */
+ static void deactivate_task(struct task_struct *p, runqueue_t *rq)
+ {
+-	rq->nr_running--;
+-	dequeue_task(p, p->array);
+-	p->array = NULL;
++	if(cwrr_task(p))
++	{
++		dequeue_task(p,p->array);
++		spin_lock(&(p->parent_container->container_lock));
++		if(p->parent_container->active_flag == 0)
++		{
++			write_lock(&rwsem);
++	        dequeue_container(p,p->array->cwrr_q);
++	        enqueue_container(p,p->array->cwrr_sq);
++		    write_unlock(&rwsem);
++		}
++		spin_unlock(&(p->parent_container->container_lock));
++	}
++	else
++	{
++	  rq->nr_running--;
++	  dequeue_task(p, p->array);
++	  p->array = NULL;
++	}
+ }
+ 
+ /*
+@@ -1144,6 +1323,12 @@
+  */
+ void fastcall sched_fork(task_t *p)
+ {
++  
++  struct weighted_container *my_container;
++  struct list_head *r, *q;
++  int found = 0;
++  int count = 0;
++
+ 	/*
+ 	 * We mark the process as running here, but have not actually
+ 	 * inserted it onto the runqueue yet. This guarantees that
+@@ -1180,6 +1365,57 @@
+ 	p->first_time_slice = 1;
+ 	current->time_slice >>= 1;
+ 	p->timestamp = sched_clock();
++	/*child inherits policy from its parent*/
++	if(cwrr_task(p->parent))
++	  {
++	    p->policy = SCHED_CWRR;
++		spin_lock(&(p->parent_container->container_lock));
++	    p->parent_container = (p->parent)->parent_container;
++		spin_unlock(&(p->parent_container->container_lock));
++	    atomic_set(&p->container_need_resched,0);
++	    p->cid = (p->parent)->cid;
++    
++		write_lock(&rwsem);
++		/*check both queues to find the container*/
++	    list_for_each_safe(r,q,((p->array)->cwrr_q))
++	      {
++		my_container = list_entry(r,struct weighted_container,container_list);
++		if(my_container->cid == p->cid)
++		  {
++		    list_add_tail(&(p->run_list),&(my_container->runnable_processes));
++		    my_container->total_processes++;
++		    enqueue_task(p,p->array);found = 1;
++		    break ;
++		  }
++		  if(count == global_CID)
++		  {
++			  break;
++		  }
++		  count ++;
++	      }	
++		 /*it has to be in one of the two*/ 
++		  if(found==0)
++		  {count =0 ; r = NULL; q = NULL;
++		  list_for_each_safe(r,q,((p->array)->cwrr_sq))
++	      {
++		my_container = list_entry(r,struct weighted_container,container_list);
++		if(my_container->cid == p->cid)
++		  {
++		    list_add_tail(&(p->run_list),&(my_container->runnable_processes));
++		    my_container->total_processes++;
++		    enqueue_task(p,p->array);
++		    break ;
++		  }
++		  if(count == global_CID)
++		  {
++			  break;
++		  }
++		  count ++;
++	      }
++		  }
++		  write_unlock(&rwsem);
++	  }
++
+ 	if (unlikely(!current->time_slice)) {
+ 		/*
+ 		 * This case is rare, it happens when the parent has only
+@@ -1292,12 +1528,68 @@
+ {
+ 	unsigned long flags;
+ 	runqueue_t *rq;
++	
++	struct list_head *r,*qq;
++	struct weighted_container *tmp;
++	int del_c = 0,found_in_q = 0,found_in_sq = 0,count = 0;
+ 
+ 	/*
+ 	 * If the child was a (relative-) CPU hog then decrease
+ 	 * the sleep_avg of the parent as well.
+ 	 */
+ 	rq = task_rq_lock(p->parent, &flags);
++
++    if(cwrr_task(p))
++	{   /*as usual loop through both queues to find the container*/
++ 		 read_lock(&rwsem);
++	  list_for_each_safe(r,qq,(p->array->cwrr_q))
++	    {
++	      
++	      tmp = list_entry(r,struct weighted_container,container_list);
++	      
++	      if(tmp->cid == p->cid){found_in_q = 1; break;}
++	      if(count == *(p->array->nr_active_cwrr_q))break;
++	      
++	      count ++ ;
++	      
++	    }
++	  
++	  if(found_in_q == 0)
++	    {
++	      count =0;r = NULL;qq = NULL;
++	      list_for_each_safe(r,qq,(p->array->cwrr_sq))
++		{
++		  
++		  tmp = list_entry(r,struct weighted_container,container_list);
++		  
++		  if(tmp->cid == p->cid){found_in_sq = 1; break;}
++		  if(count == *(p->array->nr_active_cwrr_sq))break;
++		  
++		  count ++ ;
++		  
++		}
++	    }
++	  	read_unlock(&rwsem);
++		/*no more processes remaining in container. mark from deletion
++			and remove from queue*/
++		if((--tmp->total_processes) == 0){del_c = 1; list_del(r);}
++		dequeue_task(p,p->array);/*remove task from running list*/
++		if(del_c == 0)/*still some processes exist in container*/
++		{
++             /*no more running processes: go to sleep*/
++			if((tmp->active_flag == 0) && found_in_q == 1)
++			{
++				write_lock(&rwsem);
++				dequeue_container(p,p->array->cwrr_q);
++				enqueue_container(p,p->array->cwrr_sq);
++				write_unlock(&rwsem);
++			}
++		}		
++		p->parent_container = NULL;		
++	}
++	else 
++	{
++
+ 	if (p->first_time_slice) {
+ 		p->parent->time_slice += p->time_slice;
+ 		if (unlikely(p->parent->time_slice > task_timeslice(p)))
+@@ -1307,7 +1599,9 @@
+ 		p->parent->sleep_avg = p->parent->sleep_avg /
+ 		(EXIT_WEIGHT + 1) * EXIT_WEIGHT + p->sleep_avg /
+ 		(EXIT_WEIGHT + 1);
++	}
+ 	task_rq_unlock(rq, &flags);
++	if(del_c == 1)kfree(tmp);
+ }
+ 
+ /**
+@@ -2425,7 +2719,7 @@
+ 	}
+ 
+ 	/* Task might have expired already, but not scheduled off yet */
+-	if (p->array != rq->active) {
++	if ( (p->array != rq->active) && (!cwrr_task(p)) ) { /*team 23 Changed. added the !cwrr_task(p) as we dont update that field in our tasks.*/
+ 		set_tsk_need_resched(p);
+ 		goto out;
+ 	}
+@@ -2452,6 +2746,24 @@
+ 		}
+ 		goto out_unlock;
+ 	}
++	/* team 23 ADDED: */
++	if (cwrr_task(p)){
++			if (!--p->time_slice) {					/* the task time slice has expired! refill, signal schedule(), move to back of runq */
++                        p->time_slice = 100;		/* we can decalre this globally, or by getpriority(100) ... but 100 is preety set,,,*/
++                        p->first_time_slice = 0;	
++                        set_tsk_need_resched(p);
++
++                        /* put it at the end of the queue: */
++						requeue_task(p, rq->active);
++                }
++			if (!--p->parent_container->time_slice){		/* the container time slice has expired! refill, signal schedule(), move to back of runq*/
++					p->parent_container->time_slice = 100 * p->parent_container->weight;
++			        set_container_need_resched(p);
++					requeue_task(p, rq->active);		
++				}	
++									
++		goto out_unlock;
++	}
+ 	if (!--p->time_slice) {
+ 		dequeue_task(p, rq->active);
+ 		set_tsk_need_resched(p);
+@@ -2663,6 +2975,7 @@
+ {
+ 	long *switch_count;
+ 	task_t *prev, *next;
++	struct weighted_container *next_container;
+ 	runqueue_t *rq;
+ 	prio_array_t *array;
+ 	struct list_head *queue;
+@@ -2733,7 +3046,7 @@
+ 	}
+ 
+ 	cpu = smp_processor_id();
+-	if (unlikely(!rq->nr_running)) {
++	if (unlikely(!rq->nr_running) && (!rq->nr_active_cwrr_q)) {     /* changed. if there are not container tasks, also */
+ go_idle:
+ 		idle_balance(cpu, rq);
+ 		if (!rq->nr_running) {
+@@ -2763,8 +3076,8 @@
+ 	}
+ 
+ 	array = rq->active;
+-	if (unlikely(!array->nr_active)) {
+-		/*
++	if ((unlikely(!array->nr_active)) && (!rq->nr_active_cwrr_q)) { /* changed. if there are not container tasks, also */
++  	    /*
+ 		 * Switch the active and expired arrays.
+ 		 */
+ 		schedstat_inc(rq, sched_switch);
+@@ -2773,25 +3086,50 @@
+ 		array = rq->active;
+ 		rq->expired_timestamp = 0;
+ 		rq->best_expired_prio = MAX_PRIO;
+-	} else
++	} 
++	else
+ 		schedstat_inc(rq, sched_noswitch);
+ 
+ 	idx = sched_find_first_bit(array->bitmap);
+-	queue = array->queue + idx;
+-	next = list_entry(queue->next, task_t, run_list);
+-
+-	if (!rt_task(next) && next->activated > 0) {
+-		unsigned long long delta = now - next->timestamp;
+-
+-		if (next->activated == 1)
+-			delta = delta * (ON_RUNQUEUE_WEIGHT * 128 / 100) / 128;
+-
+-		array = next->array;
+-		dequeue_task(next, array);
+-		recalc_task_prio(next, next->timestamp + delta);
+-		enqueue_task(next, array);
+-	}
+-	next->activated = 0;
++    if ( (idx > 99) && (rq->nr_active_cwrr_q)) /* then we have a CWRR task that need to run! before a priority 100 and above task */
++        {
++            /* the container might have expired. if this is the case, we need to pick a new container, and a new task withing that container. lots of info updating here.....*/
++            if ( atomic_read(&prev->container_need_resched)) /* worst case scenario, switch container, get new task from there.... */
++            {  
++                atomic_set(&prev->container_need_resched,0);                    /* clear the resched container flag */
++                requeue_container(prev,array->cwrr_q );    /* move the current container to the back of the list and get a new one... */
++                               
++                next_container = list_entry(array->cwrr_q->next,struct weighted_container, container_list); /* move next container to front of queue. */
++               
++               
++            /*--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- */
++            /*        if time permits, it doesnt hurt to add a check if the container is empty, and its reference counts/ active flag are ok. if not remove container and fetch another one.  but this is not really the place to do it.  */
++            /*--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- */
++                (rq->arrays)->current_cwrr_rq = &(next_container->runnable_processes);        /*update the container runlist pointer to point the the runlist in this new container... */
++                ((rq->arrays)+1)->current_cwrr_rq = &(next_container->runnable_processes);    /*2 arrays, 2 updates....*/
++            }
++            next = list_entry(array->current_cwrr_rq->next, task_t, run_list);
++            next->activated = 0;
++            goto switch_tasks;
++        }
++    else
++        {
++            queue = array->queue + idx;
++            next = list_entry(queue->next, task_t, run_list);
++        }
++
++    if (!rt_task(next) && next->activated > 0) {
++        unsigned long long delta = now - next->timestamp;
++
++        if (next->activated == 1)
++            delta = delta * (ON_RUNQUEUE_WEIGHT * 128 / 100) / 128;
++
++        array = next->array;
++        dequeue_task(next, array);
++        recalc_task_prio(next, next->timestamp + delta);
++        enqueue_task(next, array);
++    }
++    next->activated = 0;
+ switch_tasks:
+ 	if (next == rq->idle)
+ 		schedstat_inc(rq, sched_goidle);
+@@ -3397,93 +3735,359 @@
+  * @param: structure containing the new RT priority.
+  */
+ int sched_setscheduler(struct task_struct *p, int policy, struct sched_param *param)
+-{
+-	int retval;
+-	int oldprio, oldpolicy = -1;
+-	prio_array_t *array;
+-	unsigned long flags;
+-	runqueue_t *rq;
+-
+-recheck:
+-	/* double check policy once rq lock held */
+-	if (policy < 0)
+-		policy = oldpolicy = p->policy;
+-	else if (policy != SCHED_FIFO && policy != SCHED_RR &&
+-				policy != SCHED_NORMAL)
+-			return -EINVAL;
+-	/*
+-	 * Valid priorities for SCHED_FIFO and SCHED_RR are
+-	 * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_NORMAL is 0.
+-	 */
+-	if (param->sched_priority < 0 ||
+-	    param->sched_priority > MAX_USER_RT_PRIO-1)
+-		return -EINVAL;
+-	if ((policy == SCHED_NORMAL) != (param->sched_priority == 0))
+-		return -EINVAL;
++{   
++  int retval,count =0,found_to_q = 0,found_from_q = 0,found_to_sq = 0,found_from_sq = 0;
++  int oldprio, oldpolicy = -1;int dele =0,dele2 = 0;
++  prio_array_t *array;
++  unsigned long flags;
++  runqueue_t *rq;
++  struct weighted_container *to,*from,*tmp;
++  struct list_head *r,*qq;
++  
++ recheck:
++  /* double check policy once rq lock held */
++  if (policy < 0)
++    policy = oldpolicy = p->policy;
++  else if (policy != SCHED_FIFO && policy != SCHED_RR &&
++	   policy != SCHED_NORMAL && policy != SCHED_CWRR)
++    return -EINVAL;
++  /*
++   * Valid priorities for SCHED_FIFO and SCHED_RR are
++   * 1..MAX_USER_RT_PRIO-1, valid priority for SCHED_NORMAL is 0.
++   */
++  if (param->sched_priority < 0 ||
++      param->sched_priority > MAX_USER_RT_PRIO-1)
++    return -EINVAL;
++  if ((policy == SCHED_NORMAL) != (param->sched_priority == 0))
++    return -EINVAL;
++  
++  if ((policy == SCHED_FIFO || policy == SCHED_RR) &&
++      !capable(CAP_SYS_NICE))
++    return -EPERM;
++  if ((current->euid != p->euid) && (current->euid != p->uid) &&
++      !capable(CAP_SYS_NICE))
++    return -EPERM;
++  
++  if ((policy == SCHED_CWRR) && (!capable(CAP_SYS_ADMIN)))
++    return - EACCES;
++    
++  retval = security_task_setscheduler(p, policy, param);
++  
++  if (retval)
++    return retval;
++  
++  /*
++   * To be able to change p->policy safely, the apropriate
++   * runqueue lock must be held.
++   */
++  rq = task_rq_lock(p, &flags);
++  /* recheck policy now with rq lock held */
++  if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) 
++    {
++      policy = oldpolicy = -1;
++      task_rq_unlock(rq, &flags);
++      goto recheck;
++    }
++  
++  if(policy == SCHED_CWRR)/*regardless of current policy*/
++    {
++    /*container to container jump*/  
++    if(p->policy == SCHED_CWRR && p->cid != param->sched_priority)
++	{
++		/*find container to jump from*/
++	  read_lock(&rwsem);
++	  list_for_each_safe(r,qq,(p->array->cwrr_q))
++	    {
++	      
++	      from = list_entry(r,struct weighted_container,container_list);
++	      
++	      if(from->cid == p->cid){found_from_q = 1; break;}
++	      if(count == *(p->array->nr_active_cwrr_q))break;
++	      
++	      count ++ ;
++	      
++	    }
++	  
++	  if(found_from_q == 0)
++	    {
++	      count =0;r = NULL;qq = NULL;
++	      list_for_each_safe(r,qq,(p->array->cwrr_sq))
++		{
++		  
++		  from = list_entry(r,struct weighted_container,container_list);
++		  
++		  if(from->cid == p->cid){found_from_sq = 1; break;}
++		  if(count == *(p->array->nr_active_cwrr_sq))break;
++		  
++		  count ++ ;
++		  
++		}
++	    }
++	  
++	  if(!found_from_q && !found_from_sq){task_rq_unlock(rq, &flags);read_unlock(&rwsem);return -EFAULT; }
++	  read_unlock(&rwsem);
++	  
++	  dequeue_task(p,p->array);
++	 
++	  /*delete container if no more process in it*/
++	  spin_lock(&(p->parent_container->container_lock));
++	  if(!--p->parent_container->total_processes){list_del(r);dele = 1;}
++	  else if(found_from_q == 1 && p->parent_container->active_flag == 0)
++		{
++			write_lock(&rwsem);
++		  dequeue_container(p,p->array->cwrr_q);
++		  enqueue_container(p,p->array->cwrr_sq);
++		  write_unlock(&rwsem);		  
++		}		
++	  spin_unlock(&(p->parent_container->container_lock));
++	 
++	  /*find container to add to*/
++	  read_lock(&rwsem);
++	  list_for_each_safe(r,qq,(p->array->cwrr_q))
++	    {
++	      
++	      to = list_entry(r,struct weighted_container,container_list);
++	      
++	      if(to->cid == param->sched_priority){found_to_q = 1; break;}
++	      if(count == *(p->array->nr_active_cwrr_q))break;
++	      
++	      count ++ ;
++	      
++	    }
++	  
++	  if(found_to_q == 0)
++	    {
++	      count =0;r = NULL;qq = NULL;
++	      list_for_each_safe(r,qq,(p->array->cwrr_sq))
++		{
++		  
++		  to = list_entry(r,struct weighted_container,container_list);
++		  
++		  if(to->cid == param->sched_priority){found_to_sq = 1; break;}
++		  if(count == *(p->array->nr_active_cwrr_sq))break;
++		  
++		  count ++ ;
++		  
++		}
++	    }
++	  
++	  if(!found_to_q && !found_to_sq){task_rq_unlock(rq, &flags);read_unlock(&rwsem);return -EFAULT; }
++	  read_unlock(&rwsem);
++	  spin_lock(&(p->parent_container->container_lock));
++	  to->total_processes++;
++	  p->parent_container = to;
++	  p->cid = to->cid;
++	  
++	  spin_unlock(&(p->parent_container->container_lock));
++	  p->time_slice = 100;
++	  
++	  if(p->state == TASK_RUNNING )
++	    {
++	      enqueue_task(p,p->array);
++	      if(found_to_sq == 1)
++		{
++			write_lock(&rwsem);
++		  dequeue_container(p,p->array->cwrr_sq);
++		  enqueue_container(p,p->array->cwrr_q);
++		  write_unlock(&rwsem);		  
++		}
++	    }
++	  
++	}    
++      else if(p->policy != SCHED_CWRR)/*some other policy to SCHED_CWRR*/
++	{   /*find container to add to*/
++		read_lock(&rwsem);
++	  list_for_each_safe(r,qq,(p->array->cwrr_q))
++	    {
++	      
++	      to = list_entry(r,struct weighted_container,container_list);
++	      
++	      if(to->cid == param->sched_priority){found_to_q = 1; break;}
++	      if(count == *(p->array->nr_active_cwrr_q))break;
++	      
++	      count ++ ;
++	      
++	    }
++	  
++	  if(found_to_q == 0)
++	    {
++	      count =0;r = NULL;qq = NULL;
++	      list_for_each_safe(r,qq,(p->array->cwrr_sq))
++		{
++		  
++		  to = list_entry(r,struct weighted_container,container_list);
++		  
++		  if(to->cid == param->sched_priority){found_to_sq = 1; break;}
++		  if(count == *(p->array->nr_active_cwrr_sq))break;
++		  
++		  count ++ ;
++		  
++		}
++	    }
+ 
+-	if ((policy == SCHED_FIFO || policy == SCHED_RR) &&
+-	    !capable(CAP_SYS_NICE))
+-		return -EPERM;
+-	if ((current->euid != p->euid) && (current->euid != p->uid) &&
+-	    !capable(CAP_SYS_NICE))
+-		return -EPERM;
++	  if(!found_to_q && !found_to_sq){task_rq_unlock(rq, &flags);read_unlock(&rwsem);return -EFAULT; }
+ 
+-	retval = security_task_setscheduler(p, policy, param);
+-	if (retval)
+-		return retval;
+-	/*
+-	 * To be able to change p->policy safely, the apropriate
+-	 * runqueue lock must be held.
+-	 */
+-	rq = task_rq_lock(p, &flags);
+-	/* recheck policy now with rq lock held */
+-	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
+-		policy = oldpolicy = -1;
+-		task_rq_unlock(rq, &flags);
+-		goto recheck;
++	  read_unlock(&rwsem);
++	  
++	  spin_lock(&(p->parent_container->container_lock));
++	  to->total_processes++;
++	  p->parent_container = to;
++	  p->cid = to->cid;
++	  spin_unlock(&(p->parent_container->container_lock));
++	  p->time_slice = 100;
++	  if(p->state == TASK_RUNNING)
++	    {
++	      rq->nr_running--;
++	      dequeue_task(p,p->array);
++		  		  
++	       p->policy = policy;
++	       enqueue_task(p,p->array);
++		   
++	    if(found_to_sq == 1){
++		   write_lock(&rwsem);
++	       dequeue_container(p,p->array->cwrr_sq);
++	       enqueue_container(p,p->array->cwrr_q);
++		   write_unlock(&rwsem);
++	     }
++	      
++	    }
++		else{
++	       p->policy = policy;
++	       enqueue_task(p,p->array);
++		}
++	  
++	 
+ 	}
+-	array = p->array;
+-	if (array)
+-		deactivate_task(p, rq);
+-	oldprio = p->prio;
+-	__setscheduler(p, policy, param->sched_priority);
+-	if (array) {
+-		__activate_task(p, rq);
+-		/*
+-		 * Reschedule if we are currently running on this runqueue and
+-		 * our priority decreased, or if we are not currently running on
+-		 * this runqueue and our priority is higher than the current's
+-		 */
+-		if (task_running(rq, p)) {
+-			if (p->prio > oldprio)
+-				resched_task(rq->curr);
+-		} else if (TASK_PREEMPTS_CURR(p, rq))
+-			resched_task(rq->curr);
++      
++      task_rq_unlock(rq, &flags);
++      
++      if(dele == 1)kfree(from);
++      
++      return 0;
++      
++    }
++  else if(p->policy == SCHED_CWRR && policy != SCHED_CWRR)/*change from CWRR to any other*/
++    {
++      spin_lock(&(p->parent_container->container_lock));
++      if(!--p->parent_container->total_processes)
++	{
++	  count =0;r = NULL;qq = NULL;
++	  read_lock(&rwsem);
++	  list_for_each_safe(r,qq,(p->array->cwrr_sq))
++	    {
++	      
++	      tmp = list_entry(r,struct weighted_container,container_list);
++	      
++	      if(tmp->cid == p->parent_container->cid){list_del(r);dele2 = 1; break;}
++	      if(count == *(p->array->nr_active_cwrr_sq))break;
++	      
++	      count ++ ;
++	      
++	    }
++	  
++	  if(dele2 == 0)
++	    {     count =0;r = NULL;qq = NULL;
++	      list_for_each_safe(r,qq,(p->array->cwrr_q))
++		{
++		  
++		  tmp = list_entry(r,struct weighted_container,container_list);
++		  
++		  if(tmp->cid == p->parent_container->cid){list_del(r);dele2=1;; break;}
++		  if(count == *(p->array->nr_active_cwrr_q))break;
++		  
++		  count ++ ;
++		}
++	    }
++		read_unlock(&rwsem);
++	}
++      
++      dequeue_task(p,p->array);
++      
++	  
++	  if(p->state == TASK_RUNNING)
++	    {
++	      		   
++	    if(p->parent_container->active_flag == 0){
++		   write_lock(&rwsem);
++	       dequeue_container(p,p->array->cwrr_sq);
++	       enqueue_container(p,p->array->cwrr_q);
++		   write_unlock(&rwsem);
++	     }
++	  p->parent_container = NULL;
++      spin_unlock(&(p->parent_container->container_lock));
++    }
++	}
++  array = p->array;
++  if (array)
++    deactivate_task(p, rq);
++  oldprio = p->prio;
++  __setscheduler(p, policy, param->sched_priority);
++  if (array) {
++    __activate_task(p, rq);
++    /*
++     * Reschedule if we are currently running on this runqueue and
++     * our priority decreased, or if we are not currently running on
++     * this runqueue and our priority is higher than the current's
++     */
++    if (task_running(rq, p)) {
++      if (p->prio > oldprio)
++	resched_task(rq->curr);
++    } else if (TASK_PREEMPTS_CURR(p, rq))
++      resched_task(rq->curr);
++  }
++  task_rq_unlock(rq, &flags);
++  read_unlock_irq(&tasklist_lock);
++  if(dele2 == 1)kfree(tmp);
++  return 0;
+ 	}
+-	task_rq_unlock(rq, &flags);
+-	return 0;
+-}
+ EXPORT_SYMBOL_GPL(sched_setscheduler);
+ 
+ static int do_sched_setscheduler(pid_t pid, int policy, struct sched_param __user *param)
+ {
+-	int retval;
+-	struct sched_param lparam;
+-	struct task_struct *p;
+-
+-	if (!param || pid < 0)
+-		return -EINVAL;
+-	if (copy_from_user(&lparam, param, sizeof(struct sched_param)))
+-		return -EFAULT;
+-	read_lock_irq(&tasklist_lock);
+-	p = find_process_by_pid(pid);
+-	if (!p) {
+-		read_unlock_irq(&tasklist_lock);
+-		return -ESRCH;
+-	}
+-	retval = sched_setscheduler(p, policy, &lparam);
+-	read_unlock_irq(&tasklist_lock);
+-	return retval;
++  int retval;
++  struct sched_param lparam;
++  struct task_struct *p;
++  struct weighted_container *tmp_container;
++  if((tmp_container = (struct weighted_container*)kmalloc(sizeof(struct weighted_container*),GFP_KERNEL)) == NULL)
++    return -ENOMEM;
++    
++  if (!param || pid < 0)
++    return -EINVAL;
++  if (copy_from_user(&lparam, param, sizeof(struct sched_param)))
++    return -EFAULT;
++  read_lock_irq(&tasklist_lock);
++  p = find_process_by_pid(pid);
++  if (!p) {
++    read_unlock_irq(&tasklist_lock);
++    return -ESRCH;
++  }
++  
++  if(param->sched_priority == -1 && policy == SCHED_CWRR)
++    {
++      
++      if(global_CID >65535)
++	return -ENOMEM;
++      
++      tmp_container->cid = global_CID++;
++      tmp_container->weight = 1;
++      spin_lock_init(&tmp_container->container_lock);
++      tmp_container->active_flag = 0;
++      tmp_container->total_processes = 0;
++      INIT_LIST_HEAD(&(tmp_container->container_list));
++      INIT_LIST_HEAD(&(tmp_container->runnable_processes));
++      INIT_LIST_HEAD(&(tmp_container->sleeping_containers));
++      tmp_container->time_slice = 100 * tmp_container->weight;
++      
++      if(p->state == TASK_RUNNING)list_add_tail(&(tmp_container->container_list),p->array->cwrr_q);
++      else list_add_tail(&(tmp_container->sleeping_containers),p->array->cwrr_sq);
++      
++      lparam.sched_priority = tmp_container->cid;
++    }
++  
++  retval = sched_setscheduler(p, policy, &lparam);
++  read_unlock_irq(&tasklist_lock);
++  if(policy!=SCHED_CWRR || retval < 0)kfree(tmp_container);
++  return retval;
+ }
+ 
+ /**
+@@ -3554,6 +4158,12 @@
+ 	if (!p)
+ 		goto out_unlock;
+ 
++	if(cwrr_task(p))
++	  {
++	    retval = p->cid;
++	    goto out_unlock;
++	  }
++
+ 	retval = security_task_getscheduler(p);
+ 	if (retval)
+ 		goto out_unlock;
+@@ -3726,7 +4336,7 @@
+ 	 * (special rule: RT tasks will just roundrobin in the active
+ 	 *  array.)
+ 	 */
+-	if (rt_task(current))
++	if (rt_task(current) || cwrr_task(current))
+ 		target = rq->active;
+ 
+ 	if (current->array->nr_active == 1) {
+@@ -4898,30 +5508,30 @@
+ 				unsigned long action, void *hcpu)
+ {
+ 	int i;
+-
++	
+ 	switch (action) {
+ 	case CPU_UP_PREPARE:
+ 	case CPU_DOWN_PREPARE:
+-		for_each_online_cpu(i)
+-			cpu_attach_domain(&sched_domain_dummy, i);
+-		arch_destroy_sched_domains();
+-		return NOTIFY_OK;
+-
++	  for_each_online_cpu(i)
++	    cpu_attach_domain(&sched_domain_dummy, i);
++	  arch_destroy_sched_domains();
++	  return NOTIFY_OK;
++	  
+ 	case CPU_UP_CANCELED:
+ 	case CPU_DOWN_FAILED:
+ 	case CPU_ONLINE:
+ 	case CPU_DEAD:
+-		/*
+-		 * Fall through and re-initialise the domains.
+-		 */
+-		break;
++	  /*
++	   * Fall through and re-initialise the domains.
++	   */
++	  break;
+ 	default:
+-		return NOTIFY_DONE;
++	  return NOTIFY_DONE;
+ 	}
+-
++	
+ 	/* The hotplug lock is already held by cpu_up/cpu_down */
+ 	arch_init_sched_domains();
+-
++	
+ 	return NOTIFY_OK;
+ }
+ #endif
+@@ -4951,52 +5561,62 @@
+ 
+ void __init sched_init(void)
+ {
+-	runqueue_t *rq;
+-	int i, j, k;
+-
+-	for (i = 0; i < NR_CPUS; i++) {
+-		prio_array_t *array;
+-
+-		rq = cpu_rq(i);
+-		spin_lock_init(&rq->lock);
+-		rq->active = rq->arrays;
+-		rq->expired = rq->arrays + 1;
+-		rq->best_expired_prio = MAX_PRIO;
+-
++  runqueue_t *rq;
++  int i, j, k;
++  
++  for (i = 0; i < NR_CPUS; i++) {
++    prio_array_t *array;
++    
++    rq = cpu_rq(i);
++    spin_lock_init(&rq->lock);
++    rq->active = rq->arrays;
++    rq->expired = rq->arrays + 1;
++    rq->best_expired_prio = MAX_PRIO;
++    INIT_LIST_HEAD(&rq->cwrr_q_anchor);	/* New Addition:  the container active q*/
++    INIT_LIST_HEAD(&rq->cwrr_sq_anchor);/* New Addition : the sleeping container q*/
++    rq->nr_active_cwrr_q  = 0;
++    rq->nr_active_cwrr_sq = 0;
++				
+ #ifdef CONFIG_SMP
+-		rq->sd = &sched_domain_dummy;
+-		rq->cpu_load = 0;
+-		rq->active_balance = 0;
+-		rq->push_cpu = 0;
+-		rq->migration_thread = NULL;
+-		INIT_LIST_HEAD(&rq->migration_queue);
+-#endif
+-		atomic_set(&rq->nr_iowait, 0);
+-
+-		for (j = 0; j < 2; j++) {
+-			array = rq->arrays + j;
+-			for (k = 0; k < MAX_PRIO; k++) {
+-				INIT_LIST_HEAD(array->queue + k);
+-				__clear_bit(k, array->bitmap);
+-			}
+-			// delimiter for bitsearch
+-			__set_bit(MAX_PRIO, array->bitmap);
+-		}
+-	}
+-
+-	/*
+-	 * The boot idle thread does lazy MMU switching as well:
+-	 */
+-	atomic_inc(&init_mm.mm_count);
+-	enter_lazy_tlb(&init_mm, current);
+-
+-	/*
+-	 * Make us the idle thread. Technically, schedule() should not be
+-	 * called from this thread, however somewhere below it might be,
+-	 * but because we are the idle thread, we just pick up running again
+-	 * when this runqueue becomes "idle".
+-	 */
+-	init_idle(current, smp_processor_id());
++    rq->sd = &sched_domain_dummy;
++    rq->cpu_load = 0;
++    rq->active_balance = 0;
++    rq->push_cpu = 0;
++    rq->migration_thread = NULL;
++    INIT_LIST_HEAD(&rq->migration_queue);
++#endif
++    atomic_set(&rq->nr_iowait, 0);
++    
++    for (j = 0; j < 2; j++) {
++      array = rq->arrays + j;
++      
++      array->cwrr_q  = &rq->cwrr_q_anchor;/* New Addition create a ptr to the container q anchor*/
++      array->cwrr_sq = &rq->cwrr_sq_anchor;/* New Addition 	create a ptr to the container sleeping q anchor */
++      array->current_cwrr_rq = NULL;		/* New Addition 	create a ptr to a container's runqueu*/
++      array->nr_active_cwrr_q  = &rq->nr_active_cwrr_q;
++      array->nr_active_cwrr_sq = &rq->nr_active_cwrr_sq;
++      for (k = 0; k < MAX_PRIO; k++) {
++	INIT_LIST_HEAD(array->queue + k);
++	__clear_bit(k, array->bitmap);
++      }
++      // delimiter for bitsearch
++      __set_bit(MAX_PRIO, array->bitmap);
++    }
++  }
++  
++  /*
++   * The boot idle thread does lazy MMU switching as well:
++   */
++  atomic_inc(&init_mm.mm_count);
++  enter_lazy_tlb(&init_mm, current);
++  
++  /*
++   * Make us the idle thread. Technically, schedule() should not be
++   * called from this thread, however somewhere below it might be,
++   * but because we are the idle thread, we just pick up running again
++   * when this runqueue becomes "idle".
++   */
++  init_idle(current, smp_processor_id());
+ }
+ 
+ #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
+@@ -5055,6 +5675,137 @@
+ #ifdef	CONFIG_KDB
+ task_t *kdb_cpu_curr(int cpu)
+ {
+-	return(cpu_curr(cpu));
++  return(cpu_curr(cpu));
+ }
+ #endif
++
++
++/* The getcweight system call: return the weight of the 
++   container with the given cid. -1 on failure.
++*/
++asmlinkage int sys_getcweight(int cid)
++{
++  int weight = 0,count = 0,found = 0;
++  struct weighted_container *my_container ;
++  struct list_head *p, *q ;
++
++  /*check boundary conditions*/
++  if(cid < -1 || cid > 65535)
++    {
++      errno = EINVAL;
++      return -1;
++    } 
++  
++	/*container of the current process*/
++  if(cid == -1)
++    {
++		spin_lock(&(current->parent_container->container_lock)); 
++      weight = current->parent_container->weight;
++	  spin_unlock(&(current->parent_container->container_lock));
++	  
++    }
++  else
++    {   /*loop through the active list to find the container*/
++ 		read_lock(&rwsem);
++      list_for_each_safe(p,q,(current->array->cwrr_q))
++	{
++	  my_container = list_entry(p,struct weighted_container,container_list);
++	  if(my_container->cid == cid)/*found the container*/
++	    {
++	      weight= my_container->weight;found =1;break;
++	    }
++     if(count == global_CID)break;/*not found: exit loop*/
++	  
++	  count ++;
++	  
++    }/*not found : go through list of sleeping containers*/
++	if(found == 0)
++	{count =0;p=NULL;q=NULL;
++      list_for_each_safe(p,q,(current->array->cwrr_sq))
++	{
++	  my_container = list_entry(p,struct weighted_container,container_list);
++	  if(my_container->cid == cid)/*found the container*/
++	    {
++	      weight= my_container->weight;break;
++	    }
++          if(count == global_CID)break;/*not found: exit loop*/
++	  
++	  count ++;
++	  
++	}
++    }
++	
++    }
++  read_unlock(&rwsem);
++  if(weight <= 0)return -1;
++  
++  return weight;
++}
++
++/* The setcweight system call: sets the weight of a container
++   of a given cid after checking user permissions. returns -1 
++   on failure.
++*/
++asmlinkage int sys_setcweight(int cid, int weight)
++{
++  struct list_head *p, *q ;
++  struct weighted_container *my_container ;
++  int found = 0,count =0;
++
++  /*check boundaries*/
++  if((cid < -1 || cid > 65535) || weight < 1)
++    {
++      errno = EINVAL;
++      return -1;
++    }
++  
++  /*check for root*/
++  if(!capable(CAP_SYS_ADMIN))
++    {
++      errno = EACCES;
++      return -1;
++    } 
++  /*set weight of current*/
++  if(cid == -1)
++    {
++	  spin_lock(&(current->parent_container->container_lock));
++      current->parent_container->weight = weight;
++	  spin_unlock(&(current->parent_container->container_lock));
++    }
++  else
++    { /*look for the container with the given cid*/
++		 read_lock(&rwsem);
++      list_for_each_safe(p,q,(current->array->cwrr_q))
++	{
++	  my_container = list_entry(p,struct weighted_container,container_list);
++	  if(my_container->cid == cid) /*found container*/
++	    {
++	      weight= my_container->weight;
++	      found = 1;break;
++	    }
++	  if(count == global_CID)break;/*container doesn't exist*/
++	  
++	  count ++;
++	}
++	if(found == 0)
++	{count =0;p=NULL;q=NULL;
++      list_for_each_safe(p,q,(current->array->cwrr_sq))
++	{
++	  my_container = list_entry(p,struct weighted_container,container_list);
++	  if(my_container->cid == cid)/*found the container*/
++	    {
++	      weight= my_container->weight;found=1;break;
++	    }
++          if(count == global_CID)break;/*not found: exit loop*/
++	  
++	  count ++;
++	  
++	}
++    }
++    }
++  read_unlock(&rwsem);
++  if(!found)return -1;
++  
++  /*return success*/
++  return 0;
++}

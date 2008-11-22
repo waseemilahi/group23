@@ -1,0 +1,31 @@
+parent: I have created events: 1 and 2
+Child 0 Returned: 0 on wait
+parent: I have created events: 1 and 2
+Child 1 Returned: 0 on wait
+parent: I have created events: 1 and 2
+Child 2 Returned: 0 on wait 
+parent: I have created events: 1 and 2
+Child 3 Returned: 0 on wait
+parent: I have created events: 1 and 2
+Child 4 Returned: 4 on close 
+parent: I have created events: 1 and 2
+Child: 5 Returned: 0 on wait
+parent: I have created events: 1 and 2
+Child: 6 Returned: 0 on wait
+parent: I have created events: 1 and 2
+Child: 7 Returned: 0 on wait 
+parent: I have created events: 1 and 2
+Child: 8 Returned: 0 on wait
+parent: I have created events: 1 and 2
+Child: 9, closed an event with four waiting Returned: 4
+parent: I have created events: 1 and 2
+Child: 10 Returned: -1 on dummy wait
+parent: I have created events: 1 and 2
+Child: 11 Returned: -1 on dummy sig
+parent: I have created events: 1 and 2
+Child: 12 Returned: -1 on dummy close
+parent: I have created events: 1 and 2
+Child: 13 Returned: 3 on open
+parent: I have created events: 1 and 2
+Child: 14 Returned: 0 on close of event 3
+parent: I have created events: 1 and 2

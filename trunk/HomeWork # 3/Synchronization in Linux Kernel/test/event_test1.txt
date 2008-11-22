@@ -1,0 +1,30 @@
+parent: I have created events: 4 and 5 and 6
+Child #4 here!
+Child: 4 Returned: 2 on sig for event # 2
+parent: I have created events: 4 and 5 and 6
+Child #1 here!
+Child: 1 Returned: 0 on wait for event # 2
+parent: I have created events: 4 and 5 and 6
+Child #2 here!
+Child: 2 Returned: 0 on wait for event # 2
+parent: I have created events: 4 and 5 and 6
+Child #3 here!
+Child: 3 Returned: 0 on wait for event # 3
+parent: I have created events: 4 and 5 and 6
+Child #5 here!
+Child: 5 Returned: 0 on wait for event # 3 
+parent: I have created events: 4 and 5 and 6
+
+Parent closed event # 3: it returned : 2 
+
+parent here to tell you child 1 succeded
+parent here to tell you child 2 succeded
+parent here to tell you child 4 succeded
+parent here to tell you child 3 succeded
+parent here to tell you child 5 succeded
+
+event sig: WHEN NO ONE IS WAITING: 0
+parent: loop done, child returned. closing the remaining events
+
+Close event # 2
+Close event # 1

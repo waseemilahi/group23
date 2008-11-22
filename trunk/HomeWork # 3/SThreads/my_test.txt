@@ -1,0 +1,138 @@
+thread 1: got the lock! Return value: 0
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+thread 2: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 2: releasing the lock! Return value: 0
+a thread woke up 
+thread 3: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+a thread is going to sleep
+thread 3: releasing the lock! Return value: 0
+a thread woke up 
+thread 1: got the lock! Return value: 0
+a thread woke up 
+a thread is going to sleep
+a thread woke up 
+a thread is going to sleep
+a thread is going to sleep
+thread 1: releasing the lock! Return value: 0
+a thread woke up 
+the main program is now exiting ----3---- 
+exiting
+a thread woke up 
+a thread woke up 

@@ -1,8 +1,5 @@
 	HomeWork # 3 Group # 23 (SThreads)
 
-		Waseem Ilahi (wki2001)
-		Ben Sack      (bs2535)
-		----------------------
 
 	In this half of the assignment. The approprite 
 	code was added to the skeleton given. However some 

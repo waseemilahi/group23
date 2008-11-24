@@ -1,8 +1,6 @@
   		HomeWork # 3 Group # 23 (Kernel Synchronization Primitive)
 
-		Waseem Ilahi (wki2001)
-		Ben Sack      (bs2535)
-		----------------------
+	
 
 	Four new system calls were added to the kernel after applying 
 	KDB patch to it.

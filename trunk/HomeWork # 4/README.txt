@@ -1,9 +1,6 @@
 HomeWork # 4 Group # 23 (Kernel Synchronization Primitive)
 
-		Waseem Ilahi (wki2001)
-		Ben Sack      (bs2535)
-		----------------------
-
+	
 All of the code for this assignment is in sched.c with few fields
 added to task_struct in sched.h as well.
 

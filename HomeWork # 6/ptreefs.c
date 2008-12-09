@@ -8,16 +8,29 @@
 #include <asm/uaccess.h>	/* copy_to_user */
 #include <linux/sched.h>
 
+
+
 /* static stuff : */
 #define PTREEFS_MAGIC 9999999	/* our magic number */
 #define FILE_PERMISSIONS	0444;
 #define DIRECTORY_PERMISSIONS 0555;
 #define MAX_FILE_LEN	16
 
+
 /* since all files are going to be created internally, we should keep some impirtant pointers here so we can reference the root dir and superblock from within out code. (normally, the VFS would have provided us with those... */
-struct super_block 	*ptreefs_super_block;
-struct inode 		*ptreefs_root_inode;
+static struct super_block 	*ptreefs_super_block;
+static struct inode 		*ptreefs_root_inode;
 struct dentry 				*ptreefs_root_dentry;
+
+/*struct ptreefs_node{
+	struct dentry *file_dentry;
+	struct inode *file_inode;
+		
+	struct dentry *dir_dentry;
+	struct inode *dir_inode;
+};
+*/
+
 
 static struct super_block *ptreefs_get_super(struct file_system_type *fst,int flags, const char *devname, void *data);
 static int ptreefs_fill_super (struct super_block *sb, void *data, int silent);
@@ -26,15 +39,9 @@ static struct inode *ptreefs_make_inode(struct super_block *sb, int mode);
 static struct dentry *ptreefs_create_dir (struct super_block *sb, struct dentry *parent, const char *name);
 static struct dentry *ptreefs_create_file (struct super_block *sb, struct dentry *dir, const char *name);
 static void ptreefs_create_files (struct super_block *sb, struct dentry *root);
-struct ptreefs_node *ptreefs_create_entry(pid_t pid, struct super_block *sb, struct dentry *parent_process_dir);
+static struct ptreefs_node *ptreefs_create_entry(pid_t the_pid, struct super_block *sb, struct dentry *parent_process_dir);
 
-/* functions for in kernel implementation !!!!!!!!!!!!!! *****************************************/
-/* static void ptreefs_delete_entry(pid_t pid, struct super_block *sb, struct dentry *parent_process_dir);*/
-void ptreefs_delete_entry(struct dentry *root, struct ptreefs_node *father_node, struct task_struct * father);
-
-void ptreefs_move_to_root(struct dentry *root, struct ptreefs_node *the_node);
-void ptreefs_rename_node(char *new_name, struct ptreefs_node *the_node);
-struct ptreefs_node *ptreefs_create_entry_form_PROCESS(struct task_struct *new_task, struct super_block *sb);
+static struct ptreefs_node *ptreefs_create_entry_form_PROCESS(struct task_struct *new_task, struct super_block *sb,struct dentry *parent_process_dir);
 
 static struct inode_operations ptreefs_dir_inode_operations = 
 {
@@ -68,7 +75,12 @@ static struct file_operations ptreefs_file_ops =
 {
 	/* umm none... dah */
 };
+
+
+
+
 /* the code */
+
 
 /* everyone needs a superblock for their file system: */
 static struct super_block *ptreefs_get_super(struct file_system_type *fst,int flags, const char *devname, void *data)
@@ -108,9 +120,7 @@ static int ptreefs_fill_super (struct super_block *sb, void *data, int silent)
 	
 	sb->s_root = ptreefs_root_dentry;							/* let the superblock know we have a root directory */
 	
-	(find_task_by_pid(1))->process_ptree_node = ptreefs_create_entry((pid_t)1,sb,ptreefs_root_dentry);
-
-	 //	ptreefs_create_files(sb, ptreefs_root_dentry);
+	ptreefs_create_files(sb, ptreefs_root_dentry);
 	
 	return 0;
 }
@@ -121,6 +131,8 @@ static void ptreefs_kill_super(struct super_block *super) {
 	kill_litter_super(super);
 	//kill_anon_super(super);
 }
+
+
 
 /******** totally temp *****************/
 static struct inode *ptreefs_make_inode(struct super_block *sb, int mode)
@@ -191,47 +203,132 @@ static struct dentry *ptreefs_create_file (struct super_block *sb, struct dentry
 		return 0;
 }
 
-static void ptreefs_create_files (struct super_block *sb, struct dentry *root)
+static void ptreefs_create_files(struct super_block *sb, struct dentry *root)
 {
-	struct ptreefs_node* arr[4];
-	int i;
-	char *name = "new_name";
+	struct task_struct *p;
+	struct task_struct *parent;	
 	
-/*
- * One counter in the top-level directory.
- */
-	ptreefs_create_file(sb, root, "root_process_name.a");
-/*
- * And one in a subdirectory.
- */
-	/*
-	subdir = ptreefs_create_dir(sb, root, "A_process");
-	if (subdir) ptreefs_create_file(sb, subdir, "process_name.a");
-	*/
+	p = &init_task;
 	
-	for (i=0;i<4;i++)
+	read_lock(&tasklist_lock);
+	while ( (p = next_task(p)) != &init_task )	 
 	{
-		if (i == 0) arr[i] = ptreefs_create_entry((pid_t)1, sb, root);
-		else 
-			{
-				arr[i] = ptreefs_create_entry((pid_t)i+1, sb, arr[i-1]->dir_dentry);
-			}
+		
+		if (p == &init_task)
+		{
+			p->process_ptree_node = ptreefs_create_entry_form_PROCESS(p,sb,root);
+		}	
+		else
+		{
+			parent = p->real_parent;
+			if (p->real_parent->process_ptree_node != NULL)
+				p->process_ptree_node = ptreefs_create_entry_form_PROCESS(p,sb,p->real_parent->process_ptree_node->dir_dentry);
+			else
+				p->process_ptree_node = ptreefs_create_entry_form_PROCESS(p,sb,root);
+		}
+		
 	}
-	
-	ptreefs_rename_node(name,arr[1]);
-	
+	read_unlock(&tasklist_lock);	
 }
 
 /****** end temp **************/
 
 /********** new function relating to homework !6! ************************/
 
-struct ptreefs_node *ptreefs_create_entry(pid_t pid, struct super_block *sb, struct dentry *parent_process_dir)
+static struct ptreefs_node *ptreefs_create_entry_form_PROCESS(struct task_struct *new_task, struct super_block *sb,struct dentry *parent_process_dir)
 {
 	/* get the task! */
 	char file_name[MAX_FILE_LEN+5];
 	char directory_name[6];
 	int i;
+	char c;
+	int pid;
+	
+	struct ptreefs_node *result =  kmalloc(sizeof(struct ptreefs_node), GFP_KERNEL);
+	if (!result)
+		return NULL;
+
+	for (i=0;i<MAX_FILE_LEN;i++)
+	{
+		c = new_task->comm[i];
+		if (c == '\0') break;
+		if (c == (char)47) file_name[i] = '_';
+		else file_name[i] = c;		
+	}
+	
+	pid = (int)new_task->pid;
+	
+	if (pid > 9999)
+	{
+		directory_name[0] =  (pid / 10000) % 10 +48;	
+		directory_name[1] =  (pid / 1000) % 10 +48;
+		directory_name[2] =  (pid / 100) % 10 +48;
+		directory_name[3] =  (pid / 10) % 10 +48;
+		directory_name[4] =  pid % 10 +48;
+		directory_name[5] = '\0';
+	}
+	else 
+	if (pid > 999)
+	{
+		directory_name[0] = (pid / 1000) % 10 +48;
+		directory_name[1] = (pid / 100) % 10 +48;
+		directory_name[2] =  (pid / 10) % 10 +48;
+		directory_name[3] =  pid % 10 +48;
+		directory_name[4] = '\0';
+	}
+	else 
+	if (pid > 99)
+	{
+		directory_name[0] =  (pid / 100) % 10 +48;
+		directory_name[1] =  (pid / 10) % 10 +48;
+		directory_name[2] =  (pid % 10) +48;
+		directory_name[3] = '\0';
+	}
+	else 
+	if (pid > 9)
+	{
+		directory_name[0] = (pid / 10) % 10 +48;
+		directory_name[1] = (pid % 10) +48;
+		directory_name[2] = '\0';
+	}
+	else 
+	{
+		directory_name[0] = pid % 10 +48;
+		directory_name[1] = '\0';
+	}
+	
+	/* k we got the tasks name lets make a directory for it */
+	 /* the dir we are creating */
+	
+	result->dir_dentry = ptreefs_create_dir(sb, parent_process_dir, directory_name);
+		
+	file_name[i] = '.';
+	file_name[i+1] = 'n';
+	file_name[i+2] = 'a';
+	file_name[i+3] = 'm';
+	file_name[i+4] = 'e';
+	file_name[i+5] = '\0';	
+	
+	if (result->dir_dentry) 
+		result->file_dentry = ptreefs_create_file(sb, result->dir_dentry, file_name);	
+	
+	
+	result->file_inode = result->file_dentry->d_inode;
+	result->dir_inode = result->dir_dentry->d_inode;
+	
+	return result;
+}
+
+
+
+
+static struct ptreefs_node *ptreefs_create_entry(pid_t the_pid, struct super_block *sb, struct dentry *parent_process_dir)
+{
+	/* get the task! */
+	char file_name[MAX_FILE_LEN+5];
+	char directory_name[6];
+	int i;
+	int pid = (int)the_pid;
 	struct task_struct *tsk;
 
 	char c;
@@ -261,55 +358,46 @@ struct ptreefs_node *ptreefs_create_entry(pid_t pid, struct super_block *sb, str
 	
 	if (pid > 9999)
 	{
-		directory_name[0] = (char)(((pid / 10000) % 10) +48);	
-		pid = pid/10;
-		directory_name[1] = (char)(((pid / 1000) % 10) +48);
-		pid = pid/10;
-		directory_name[2] = (char)(((pid / 100) % 10) +48);
-		pid = pid/10;
-		directory_name[3] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[4] = (char)(pid % 10) +48;
+		directory_name[0] = pid / 10000 % 10 +48;	
+		directory_name[1] = pid / 1000 % 10 +48;
+		directory_name[2] = pid / 100 % 10 +48;
+		directory_name[3] = pid / 10 % 10 +48;
+		directory_name[4] = pid % 10 +48;
 		directory_name[5] = '\0';
 	}
 	else 
 	if (pid > 999)
 	{
-		directory_name[0] = (char)(((pid / 1000) % 10) +48);
-		pid = pid/10;
-		directory_name[1] = (char)(((pid / 100) % 10) +48);
-		pid = pid/10;
-		directory_name[2] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[3] = (char)(pid % 10) +48;
+		directory_name[0] = (pid / 1000) % 10 +48;
+		directory_name[1] = (pid / 100)% 10 +48;
+		directory_name[2] = (pid / 10) % 10 +48;
+		directory_name[3] = pid % 10 +48;
 		directory_name[4] = '\0';
 	}
 	else 
 	if (pid > 99)
 	{
-		directory_name[0] = (char)(((pid / 100) % 10) +48);
-		pid = pid/10;
-		directory_name[1] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[2] = (char)(pid % 10) +48;
+		directory_name[0] = pid / 100 % 10 +48;
+		directory_name[1] = pid / 10 % 10 +48;
+		directory_name[2] = pid % 10 +48;
 		directory_name[3] = '\0';
 	}
 	else 
 	if (pid > 9)
 	{
-		directory_name[0] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[1] = (char)(pid % 10) +48;
+		directory_name[0] = pid / 10 % 10 +48;
+		directory_name[1] = pid % 10 +48;
 		directory_name[2] = '\0';
 	}
 	else 
 	{
-		directory_name[0] = (char)(pid % 10) +48;
+		directory_name[0] = pid % 10 +48;
 		directory_name[1] = '\0';
 	}
 	
 	/* k we got the tasks name lets make a directory for it */
 	 /* the dir we are creating */
+	
 	
 	result->dir_dentry = ptreefs_create_dir(sb, parent_process_dir, directory_name);
 		
@@ -330,205 +418,10 @@ struct ptreefs_node *ptreefs_create_entry(pid_t pid, struct super_block *sb, str
 	return result;
 }
 
-/*
-	usage: 
-	
-	process_ptree_node =  ptreefs_create_entry_form_PROCESS(new_task, sb, parent_process_dir);
-	
-	new_task: 			ptr to the new task. 
-	sb	     : 			ptr to ptreefs's SuperBlock
-*/
-struct ptreefs_node *ptreefs_create_entry_form_PROCESS(struct task_struct *new_task, struct super_block *sb)
-{
-	/* get the task! */
-	char file_name[MAX_FILE_LEN+5];
-	char directory_name[6];
-	int i;
-	char c;
-	int pid;
-	
-	struct ptreefs_node *result =  kmalloc(sizeof(struct ptreefs_node), GFP_KERNEL);
-	if (!result)
-		return NULL;
-
-	for (i=0;i<MAX_FILE_LEN;i++)
-	{
-		c = new_task->comm[i];
-		if (c == '\0') break;
-		if (c == (char)47) file_name[i] = '_';
-		else file_name[i] = c;		
-	}
-	
-	pid = (int)new_task->pid;
-	
-	if (pid > 9999)
-	{
-		directory_name[0] = (char)(((pid / 10000) % 10) +48);	
-		pid = pid/10;
-		directory_name[1] = (char)(((pid / 1000) % 10) +48);
-		pid = pid/10;
-		directory_name[2] = (char)(((pid / 100) % 10) +48);
-		pid = pid/10;
-		directory_name[3] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[4] = (char)(pid % 10) +48;
-		directory_name[5] = '\0';
-	}
-	else 
-	if (pid > 999)
-	{
-		directory_name[0] = (char)(((pid / 1000) % 10) +48);
-		pid = pid/10;
-		directory_name[1] = (char)(((pid / 100) % 10) +48);
-		pid = pid/10;
-		directory_name[2] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[3] = (char)(pid % 10) +48;
-		directory_name[4] = '\0';
-	}
-	else 
-	if (pid > 99)
-	{
-		directory_name[0] = (char)(((pid / 100) % 10) +48);
-		pid = pid/10;
-		directory_name[1] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[2] = (char)(pid % 10) +48;
-		directory_name[3] = '\0';
-	}
-	else 
-	if (pid > 9)
-	{
-		directory_name[0] = (char)(((pid / 10) % 10) +48);
-		pid = pid/10;
-		directory_name[1] = (char)(pid % 10) +48;
-		directory_name[2] = '\0';
-	}
-	else 
-	{
-		directory_name[0] = (char)(pid % 10) +48;
-		directory_name[1] = '\0';
-	}
-	
-	/* k we got the tasks name lets make a directory for it */
-	 /* the dir we are creating */
-	
-	result->dir_dentry = ptreefs_create_dir(sb, new_task->real_parent->process_ptree_node->dir_dentry,directory_name);
-		
-	file_name[i] = '.';
-	file_name[i+1] = 'n';
-	file_name[i+2] = 'a';
-	file_name[i+3] = 'm';
-	file_name[i+4] = 'e';
-	file_name[i+5] = '\0';	
-	
-	if (result->dir_dentry) 
-		result->file_dentry = ptreefs_create_file(sb, result->dir_dentry, file_name);	
-	
-	
-	result->file_inode = result->file_dentry->d_inode;
-	result->dir_inode = result->dir_dentry->d_inode;
-	
-	return result;
-}
-
-
-/* 
-	ptreefs_delete_entry(root,father_node,father);
-	
-	root: ptr to the root directory (dentry)
-	father_node: the  ptreefs_node of the  task struct that is exiting. 
-	father - task struct that is exiting. 
-*/
-static void ptreefs_delete_entry(struct dentry *root, struct ptreefs_node *father_node, struct task_struct * father)						 
-{
-	struct task_struct *p;
-	struct list_head *_p, *_n;
- 
-         
-        list_for_each_safe(_p, _n, &father->children) 
-		{
-			p = list_entry(_p,struct task_struct,sibling);
-			ptreefs_move_to_root(root, p->process_ptree_node);
-		}	
-		
-		father_node->file_dentry->d_inode = NULL;
-		father_node->dir_dentry->d_inode = NULL;
-		
-		dput(father_node->file_dentry);
-		dput(father_node->dir_dentry);
-		/* d_delete maybe? */
-		
-		iput(father_node->file_inode);
-		iput(father_node->dir_inode);	
-	/* umm delete the entry. and free the node! */	
-}
-
-static void ptreefs_move_to_root(struct dentry *root, struct ptreefs_node *the_node)
-{
-	struct dentry *new_dentry;
-	struct dentry *tmp = new_dentry;
-	
-	new_dentry = d_alloc(root, &the_node->dir_dentry->d_name);	
-	if (new_dentry)
-	{
-		d_move(the_node->dir_dentry, new_dentry);
-		the_node->dir_dentry = tmp;
-		the_node->dir_inode = the_node->dir_dentry->d_inode;//tmp change: no approval from Ben :)
-	}
-}
-
-/*
-	to be used in EXEC ( after the new name is given to the process!!! ) 
-	ptreefs_rename_node(new_name, the_node)
-	
-	new_name 	= should be : current->comm
-	the node 	= current->process_ptree_node
-	
-	that simple
-*/
-static void ptreefs_rename_node(char *new_name, struct ptreefs_node *the_node)
-{
-	struct qstr qname;
-	struct dentry *new_dentry;
-	struct dentry *tmp = new_dentry;
-	int i; char c;
-	char file_name[MAX_FILE_LEN+5];
-	
-	for (i=0;i<MAX_FILE_LEN;i++)
-	{
-		c = new_name[i];
-		if (c == '\0') break;
-		if (c == (char)47) file_name[i] = '_';
-		else file_name[i] = c;		
-	}
-	file_name[i] = '.';
-	file_name[i+1] = 'n';
-	file_name[i+2] = 'a';
-	file_name[i+3] = 'm';
-	file_name[i+4] = 'e';
-	file_name[i+5] = '\0';	
-	
-	
-	qname.name = file_name;
-	qname.len = strlen (file_name);
-	qname.hash = full_name_hash(file_name, qname.len);
-	
-	new_dentry = d_alloc(the_node->file_dentry->d_parent, &qname);
-	if (new_dentry)
-	{
-		d_move(the_node->file_dentry, new_dentry);
-		the_node->file_dentry = tmp;
-		the_node->dir_inode = the_node->file_dentry->d_inode;
-	}
-}
-
-
-/**************end new function relating to homework5***************************************/
 
 /* these will change if we decide to have this inside the kernel. currently its defined to work as a mofule : */
 /*******************************************************************************************/
-int ptreefs_init_module(void) 
+static int ptreefs_init_module(void) 
 {
   return register_filesystem(&ptreefs);
 }
@@ -542,3 +435,7 @@ module_init(ptreefs_init_module);
 module_exit(ptreefs_cleanup_module);
 
 MODULE_LICENSE("GPL");
+
+
+
+

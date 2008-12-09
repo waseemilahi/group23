@@ -1,0 +1,38 @@
+add to kernel files: 
+
+kernel/fork.c
+L1165
+right after wake up new task
+
+wake_up_new_task(p, clone_flags);
+
+if (PTREE_FS_ENABLED)
+{
+	p->process_ptree_node = ptreefs_create_entry_form_PROCESS(p,ptreefs_super_block,p->real_parent->process_ptree_node->dir_dentry);
+}
+
+
+
+
+arch/i386/kernel/process.c
+L682
+
+
+if (PTREE_FS_ENABLED)
+{
+	ptreefs_precess_exec(filename, current->process_ptree_node);
+}
+
+
+/kernel/exit.c
+L691
+
+
+if (PTREE_FS_ENABLED)
+{
+	 ptreefs_process_exit(tsk,tsk->process_ptree_node);
+}
+
+
+
+
